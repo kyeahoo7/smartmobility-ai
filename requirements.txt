@@ -1,0 +1,16 @@
+pandas
+numpy
+requests
+sqlalchemy
+psycopg[binary]
+scikit-learn
+xgboost
+fastapi
+uvicorn
+streamlit
+plotly
+folium
+streamlit-folium
+python-dotenv
+joblib
+jupyter

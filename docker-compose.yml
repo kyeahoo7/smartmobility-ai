@@ -1,0 +1,22 @@
+version: '3.9'
+
+services:
+
+  postgres:
+    image: postgres:15
+    container_name: smartmobility_postgres
+
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: smartmobility
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+
+volumes:
+  postgres_data:
