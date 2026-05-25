@@ -1,0 +1,79 @@
+# =========================
+# PYTHON
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environnements virtuels
+venv/
+env/
+.venv/
+
+# =========================
+# JUPYTER
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# ENV VARIABLES / SECRETS
+# =========================
+.env
+
+# =========================
+# DATA FILES
+# =========================
+data/raw/*.csv
+data/processed/*.csv
+data/external/*
+
+# Garder la structure des dossiers
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/external/.gitkeep
+
+# =========================
+# MODELS
+# =========================
+models/*.pkl
+models/*.joblib
+
+# =========================
+# LOGS
+# =========================
+*.log
+
+# =========================
+# OS FILES
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# IDE / EDITORS
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# DOCKER
+# =========================
+postgres_data/
+
+# =========================
+# STREAMLIT CACHE
+# =========================
+.streamlit/
+
+# =========================
+# TESTS / COVERAGE
+# =========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# =========================
+# TEMP FILES
+# =========================
+*.tmp
+*.temp
