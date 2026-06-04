@@ -214,6 +214,15 @@ git clone https://github.com/kyeahoo7/smartmobility-ai.git
 cd smartmobility-ai
 ```
 
+## Prérequis
+
+- Docker Desktop
+- Python 3.10+
+
+## Démarrage de la base de données
+
+docker compose up -d
+
 ### Installer les dépendances
 
 ```bash
@@ -257,6 +266,7 @@ python etl/prepare_forecast_dataset.py
 ### Entraîner le modèle
 
 ```bash
+python etl/prepare_forecast_dataset.py
 python models/train_forecast_model.py
 ```
 
