@@ -283,4 +283,4 @@ streamlit run dashboard/app.py
 
 Projet réalisé dans le cadre du Master Big Data & Intelligence Artificielle.
 
-Développé par Youness Mostefaoui.
+Développé par Youness MOSTEFAOUI et Yani GHANDRICHE.
