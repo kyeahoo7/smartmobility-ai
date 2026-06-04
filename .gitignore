@@ -4,6 +4,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
 
 # Environnements virtuels
 venv/
@@ -77,3 +79,6 @@ htmlcov/
 # =========================
 *.tmp
 *.temp
+
+# Streamlit cache
+.streamlit/

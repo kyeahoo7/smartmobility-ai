@@ -1,16 +1,14 @@
 import os
 import joblib
+import requests
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import math
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
-
-# =========================
-# CONFIG
-# =========================
 
 st.set_page_config(
     page_title="SmartMobility Paris AI",
@@ -25,21 +23,19 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT")
 DB_NAME = os.getenv("DB_NAME")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 engine = create_engine(
     f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
 
-# =========================
-# LOAD DATA
-# =========================
-
 @st.cache_data
 def load_data():
     traffic = pd.read_sql("""
         SELECT 
             t.id,
+            t.location_id,
             t.timestamp,
             t.flow_rate,
             t.occupancy_rate,
@@ -54,170 +50,377 @@ def load_data():
     weather = pd.read_sql("SELECT * FROM weather_data", engine)
     pollution = pd.read_sql("SELECT * FROM pollution_data", engine)
 
+    traffic["timestamp"] = pd.to_datetime(traffic["timestamp"])
+    weather["timestamp"] = pd.to_datetime(weather["timestamp"])
+    pollution["timestamp"] = pd.to_datetime(pollution["timestamp"])
+
     return traffic, weather, pollution
 
 
 traffic_df, weather_df, pollution_df = load_data()
 
 
-# =========================
-# SIDEBAR
-# =========================
-
-st.sidebar.title("🚦 SmartMobility Paris AI")
-page = st.sidebar.radio(
-    "Navigation",
-    [
-        "Accueil",
-        "Analyse trafic",
-        "Carte interactive",
-        "Météo & pollution",
-        "Prédiction IA"
-    ]
-)
-
-
-# =========================
-# HELPERS
-# =========================
-
-def classify_congestion_label(value):
-    if value == 0:
-        return "Faible"
-    elif value == 1:
-        return "Moyenne"
-    elif value == 2:
-        return "Forte"
-    else:
-        return "Inconnue"
-
-
-def classify_color_label(flow):
+def congestion_from_flow(flow):
     if flow < 300:
         return "Faible"
     elif flow < 800:
         return "Moyenne"
-    else:
-        return "Forte"
+    return "Forte"
 
 
-# =========================
-# ACCUEIL
-# =========================
+def congestion_score(row):
+    return (row["flow_rate"] * 0.7) + (row["occupancy_rate"] * 30)
 
-if page == "Accueil":
+
+def get_sensor_code(location_name):
+    return pd.Categorical(traffic_df["location_name"]).categories.get_loc(location_name)
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    r = 6371000
+
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1)
+        * math.cos(phi2)
+        * math.sin(delta_lambda / 2) ** 2
+    )
+
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return r * c
+
+
+def get_nearby_transports(lat, lon, radius=1200):
+    overpass_url = "https://overpass-api.de/api/interpreter"
+
+    query = f"""
+    [out:json][timeout:25];
+    (
+      node(around:{radius},{lat},{lon})["railway"="station"];
+      node(around:{radius},{lat},{lon})["railway"="tram_stop"];
+      node(around:{radius},{lat},{lon})["station"="subway"];
+      node(around:{radius},{lat},{lon})["subway"="yes"];
+      node(around:{radius},{lat},{lon})["highway"="bus_stop"];
+      node(around:{radius},{lat},{lon})["public_transport"];
+    );
+    out body 50;
+    """
+
+    try:
+        response = requests.post(
+            overpass_url,
+            data={"data": query},
+            timeout=25
+        )
+
+        if response.status_code != 200:
+            return []
+
+        elements = response.json().get("elements", [])
+        transports = []
+
+        for el in elements:
+            tags = el.get("tags", {})
+
+            name = tags.get("name")
+            if not name:
+                continue
+
+            stop_lat = el.get("lat")
+            stop_lon = el.get("lon")
+
+            if stop_lat is None or stop_lon is None:
+                continue
+
+            if tags.get("railway") == "station" or tags.get("station") == "subway" or tags.get("subway") == "yes":
+                transport_type = "Métro / RER"
+            elif tags.get("railway") == "tram_stop":
+                transport_type = "Tramway"
+            elif tags.get("highway") == "bus_stop":
+                transport_type = "Bus"
+            else:
+                transport_type = "Transport public"
+
+            distance_m = haversine_distance(
+                lat,
+                lon,
+                stop_lat,
+                stop_lon
+            )
+
+            walking_minutes = round(distance_m / 80)
+
+            transports.append({
+                "name": name,
+                "type": transport_type,
+                "distance_m": round(distance_m),
+                "walking_minutes": walking_minutes
+            })
+
+        transports = sorted(
+            transports,
+            key=lambda x: x["distance_m"]
+        )
+
+        unique = []
+        seen = set()
+
+        for item in transports:
+            key = (item["name"], item["type"])
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+
+        return unique[:8]
+
+    except Exception:
+        return []
+
+
+def generate_mistral_recommendation(
+    location_name,
+    congestion,
+    current_flow,
+    predicted_flow,
+    transports
+):
+    if not MISTRAL_API_KEY:
+        return (
+            "Clé Mistral absente. Ajoute MISTRAL_API_KEY dans ton fichier .env "
+            "pour générer une recommandation IA."
+        )
+
+    transports_text = "\n".join(
+    [
+        f"- {t['name']} ({t['type']}) à {t['distance_m']} m, environ {t['walking_minutes']} min à pied"
+        for t in transports
+    ]
+    )
+
+    prompt = f"""
+Tu es un assistant mobilité urbaine pour Paris.
+
+Une congestion est prévue sur le capteur suivant :
+- Zone / capteur : {location_name}
+- Congestion prévue : {congestion}
+- Débit actuel : {round(current_flow, 2)}
+- Débit prévu H+1 : {round(predicted_flow, 2)}
+
+Transports en commun proches détectés :
+{transports_text}
+
+Génère une recommandation courte, claire et professionnelle.
+Objectif :
+- expliquer le risque de congestion ;
+- citer le transport le plus proche avec sa distance et son temps à pied ;
+- proposer une alternative claire pour éviter la zone congestionnée ;
+- ne pas inventer de lignes ou stations non listées ;
+- donner une recommandation opérationnelle.
+"""
+
+    url = "https://api.mistral.ai/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {MISTRAL_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "mistral-small-latest",
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.4
+    }
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            return f"Erreur Mistral API : {response.status_code} - {response.text}"
+
+        data = response.json()
+
+        return data["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        return f"Erreur Mistral : {e}"
+
+
+traffic_df["congestion_estimee"] = traffic_df["flow_rate"].apply(congestion_from_flow)
+traffic_df["criticite_score"] = traffic_df.apply(congestion_score, axis=1)
+
+
+st.sidebar.title("🚦 SmartMobility Paris AI")
+st.sidebar.caption("Dashboard d’analyse et de prévision de mobilité urbaine")
+
+page = st.sidebar.radio(
+    "Navigation",
+    [
+        "🏠 Accueil",
+        "📊 Analyse trafic",
+        "🗺️ Carte interactive",
+        "🚨 Zones critiques",
+        "🌦️ Météo & pollution",
+        "🚗 Prévision trafic H+1",
+        "📈 Monitoring IA",
+        "💡 Recommandations"
+    ]
+)
+
+st.sidebar.divider()
+st.sidebar.info(
+    "MVP Big Data & IA basé sur des données ouvertes : trafic, météo, pollution et prévision H+1."
+)
+
+
+if page == "🏠 Accueil":
     st.title("🚦 SmartMobility Paris AI")
-    st.subheader("Plateforme intelligente d’analyse et de prédiction de la mobilité urbaine")
+    st.subheader("Plateforme intelligente d’analyse de la mobilité urbaine à Paris")
 
     st.markdown("""
-    Ce dashboard présente un MVP de plateforme data/IA pour l’analyse du trafic parisien.
-    
-    Il combine :
-    - données de trafic routier,
-    - données météo,
-    - données pollution,
-    - modèle IA de prédiction de congestion.
+    Ce dashboard permet d’analyser les flux de circulation, d’identifier les zones critiques,
+    de visualiser les données environnementales et de prédire le trafic à H+1.
     """)
 
     col1, col2, col3, col4 = st.columns(4)
-
     col1.metric("Lignes trafic", len(traffic_df))
-    col2.metric("Zones / capteurs", traffic_df["location_name"].nunique())
+    col2.metric("Capteurs", traffic_df["location_name"].nunique())
     col3.metric("Débit moyen", round(traffic_df["flow_rate"].mean(), 2))
     col4.metric("Occupation moyenne", f"{round(traffic_df['occupancy_rate'].mean(), 2)} %")
 
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Débit max", round(traffic_df["flow_rate"].max(), 2))
+    col2.metric("Zone la plus chargée", traffic_df.groupby("location_name")["flow_rate"].mean().idxmax())
+    col3.metric("Congestion dominante", traffic_df["congestion_estimee"].mode()[0])
+
     st.divider()
 
-    st.subheader("Aperçu des données trafic")
-    st.dataframe(traffic_df.head(20), use_container_width=True)
+    st.subheader("Pipeline du projet")
+    st.code("""
+OpenData Paris / Open-Meteo
+        ↓
+ETL Python
+        ↓
+PostgreSQL
+        ↓
+Feature Engineering
+        ↓
+Modèle IA RandomForest Regressor
+        ↓
+Dashboard Streamlit
+    """)
+
+    st.subheader("Aperçu des données")
+    st.dataframe(traffic_df.head(20), width="stretch")
 
 
-# =========================
-# ANALYSE TRAFIC
-# =========================
-
-elif page == "Analyse trafic":
+elif page == "📊 Analyse trafic":
     st.title("📊 Analyse du trafic")
 
-    st.subheader("Distribution du débit de circulation")
+    col1, col2 = st.columns(2)
 
-    fig = px.histogram(
-        traffic_df,
-        x="flow_rate",
-        nbins=30,
-        title="Distribution du flow_rate"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    with col1:
+        fig = px.histogram(
+            traffic_df,
+            x="flow_rate",
+            nbins=30,
+            title="Distribution du débit de circulation"
+        )
+        st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Top 10 des zones avec le plus fort débit moyen")
+    with col2:
+        fig = px.histogram(
+            traffic_df,
+            x="occupancy_rate",
+            nbins=30,
+            title="Distribution du taux d’occupation"
+        )
+        st.plotly_chart(fig, width="stretch")
 
-    top_zones = (
-        traffic_df
-        .groupby("location_name")["flow_rate"]
-        .mean()
-        .sort_values(ascending=False)
-        .head(10)
-        .reset_index()
-    )
+    st.subheader("Évolution temporelle du trafic")
 
-    fig = px.bar(
-        top_zones,
-        x="location_name",
+    fig = px.line(
+        traffic_df.sort_values("timestamp"),
+        x="timestamp",
         y="flow_rate",
-        title="Top zones par débit moyen"
+        color="location_name",
+        title="Débit de circulation par capteur"
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Débit et occupation par zone")
+    st.subheader("Analyse par zone")
 
     selected_zone = st.selectbox(
         "Choisir une zone",
-        traffic_df["location_name"].dropna().unique()
+        sorted(traffic_df["location_name"].dropna().unique())
     )
 
     zone_df = traffic_df[traffic_df["location_name"] == selected_zone]
 
-    col1, col2 = st.columns(2)
-    col1.metric("Débit moyen zone", round(zone_df["flow_rate"].mean(), 2))
-    col2.metric("Occupation moyenne zone", f"{round(zone_df['occupancy_rate'].mean(), 2)} %")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Débit moyen", round(zone_df["flow_rate"].mean(), 2))
+    col2.metric("Occupation moyenne", f"{round(zone_df['occupancy_rate'].mean(), 2)} %")
+    col3.metric("État dominant", zone_df["congestion_level"].mode()[0])
 
-    st.dataframe(zone_df, use_container_width=True)
+    st.dataframe(zone_df, width="stretch")
 
 
-# =========================
-# CARTE INTERACTIVE
-# =========================
-
-elif page == "Carte interactive":
-    st.title("🗺️ Carte interactive des zones de trafic")
+elif page == "🗺️ Carte interactive":
+    st.title("🗺️ Carte interactive des capteurs")
 
     map_df = (
         traffic_df
         .groupby(["location_name", "latitude", "longitude"])
         .agg(
             flow_rate=("flow_rate", "mean"),
-            occupancy_rate=("occupancy_rate", "mean")
+            occupancy_rate=("occupancy_rate", "mean"),
+            criticite_score=("criticite_score", "mean")
         )
         .reset_index()
     )
 
-    map_df["congestion"] = map_df["flow_rate"].apply(classify_color_label)
+    map_df["congestion_estimee"] = map_df["flow_rate"].apply(congestion_from_flow)
+
+    congestion_filter = st.multiselect(
+        "Filtrer par congestion",
+        ["Faible", "Moyenne", "Forte"],
+        default=["Faible", "Moyenne", "Forte"]
+    )
+
+    map_df = map_df[map_df["congestion_estimee"].isin(congestion_filter)]
 
     fig = px.scatter_mapbox(
         map_df,
         lat="latitude",
         lon="longitude",
         size="flow_rate",
-        color="congestion",
+        color="congestion_estimee",
         hover_name="location_name",
         hover_data={
-            "flow_rate": True,
-            "occupancy_rate": True,
+            "flow_rate": ":.2f",
+            "occupancy_rate": ":.2f",
+            "criticite_score": ":.2f",
             "latitude": False,
             "longitude": False
         },
         zoom=11,
-        height=650,
+        height=700,
         title="Carte des capteurs de trafic"
     )
 
@@ -226,117 +429,434 @@ elif page == "Carte interactive":
         margin={"r": 0, "t": 40, "l": 0, "b": 0}
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
-# =========================
-# METEO POLLUTION
-# =========================
+elif page == "🚨 Zones critiques":
+    st.title("🚨 Analyse des zones critiques")
 
-elif page == "Météo & pollution":
+    critical_df = (
+        traffic_df
+        .groupby("location_name")
+        .agg(
+            debit_moyen=("flow_rate", "mean"),
+            debit_max=("flow_rate", "max"),
+            occupation_moyenne=("occupancy_rate", "mean"),
+            criticite_score=("criticite_score", "mean"),
+            nb_mesures=("id", "count")
+        )
+        .sort_values("criticite_score", ascending=False)
+        .reset_index()
+    )
+
+    st.subheader("Top 10 des zones les plus critiques")
+
+    top10 = critical_df.head(10)
+
+    fig = px.bar(
+        top10,
+        x="location_name",
+        y="criticite_score",
+        title="Classement des zones critiques",
+        text_auto=True
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Tableau détaillé")
+    st.dataframe(critical_df, width="stretch")
+
+    st.subheader("Interprétation")
+    st.markdown("""
+    Le score de criticité combine le débit moyen de circulation et le taux d’occupation moyen.
+    Il permet d’identifier rapidement les capteurs où la circulation est la plus sensible.
+    """)
+
+
+elif page == "🌦️ Météo & pollution":
     st.title("🌦️ Météo & pollution")
 
-    col1, col2, col3 = st.columns(3)
+    st.subheader("Indicateurs météo")
 
-    if len(weather_df) > 0:
-        col1.metric("Température moyenne", f"{round(weather_df['temperature'].mean(), 2)} °C")
-        col2.metric("Humidité moyenne", f"{round(weather_df['humidity'].mean(), 2)} %")
-        col3.metric("Vent moyen", f"{round(weather_df['wind_speed'].mean(), 2)} km/h")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Température moyenne", f"{round(weather_df['temperature'].mean(), 2)} °C")
+    col2.metric("Humidité moyenne", f"{round(weather_df['humidity'].mean(), 2)} %")
+    col3.metric("Vent moyen", f"{round(weather_df['wind_speed'].mean(), 2)} km/h")
+    col4.metric("Précipitations moyennes", round(weather_df["precipitation"].mean(), 2))
 
-        st.subheader("Évolution météo")
-        weather_df["timestamp"] = pd.to_datetime(weather_df["timestamp"])
-
-        fig = px.line(
-            weather_df,
-            x="timestamp",
-            y=["temperature", "humidity", "wind_speed"],
-            title="Météo horaire"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    fig = px.line(
+        weather_df,
+        x="timestamp",
+        y=["temperature", "humidity", "wind_speed", "precipitation"],
+        title="Évolution des données météo"
+    )
+    st.plotly_chart(fig, width="stretch")
 
     st.divider()
 
-    if len(pollution_df) > 0:
-        col1, col2, col3 = st.columns(3)
+    st.subheader("Indicateurs pollution")
 
-        col1.metric("NO2 moyen", round(pollution_df["no2"].mean(), 2))
-        col2.metric("PM10 moyen", round(pollution_df["pm10"].mean(), 2))
-        col3.metric("PM2.5 moyen", round(pollution_df["pm25"].mean(), 2))
+    col1, col2, col3 = st.columns(3)
+    col1.metric("NO2 moyen", round(pollution_df["no2"].mean(), 2))
+    col2.metric("PM10 moyen", round(pollution_df["pm10"].mean(), 2))
+    col3.metric("PM2.5 moyen", round(pollution_df["pm25"].mean(), 2))
 
-        st.subheader("Évolution pollution")
-        pollution_df["timestamp"] = pd.to_datetime(pollution_df["timestamp"])
+    fig = px.line(
+        pollution_df,
+        x="timestamp",
+        y=["no2", "pm10", "pm25"],
+        title="Évolution des polluants"
+    )
+    st.plotly_chart(fig, width="stretch")
 
-        fig = px.line(
-            pollution_df,
-            x="timestamp",
-            y=["no2", "pm10", "pm25"],
-            title="Pollution horaire"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("Table pollution")
+    st.dataframe(pollution_df.head(50), width="stretch")
 
 
-# =========================
-# PREDICTION IA
-# =========================
-
-elif page == "Prédiction IA":
-    st.title("🤖 Prédiction de congestion")
+elif page == "🚗 Prévision trafic H+1":
+    st.title("🚗 Prévision du trafic à H+1")
 
     st.markdown("""
-    Cette section utilise le modèle RandomForest entraîné pour prédire un niveau de congestion.
-    
-    Classes :
-    - 0 : faible
-    - 1 : moyenne
-    - 2 : forte
+    Cette section utilise un modèle de régression RandomForest pour prédire le débit de circulation
+    à la prochaine mesure du capteur.
     """)
 
-    model_path = "models/random_forest_model.pkl"
+    model_path = "models/traffic_forecast_model.pkl"
 
     if not os.path.exists(model_path):
-        st.error("Modèle introuvable. Lance d'abord : python models/train_model.py")
+        st.error("Modèle forecast introuvable. Lance : python models/train_forecast_model.py")
     else:
         model = joblib.load(model_path)
 
-        col1, col2 = st.columns(2)
+        selected_zone = st.selectbox(
+            "Choisir un capteur",
+            sorted(traffic_df["location_name"].dropna().unique())
+        )
 
-        with col1:
-            flow_rate = st.slider("Débit trafic", 0, 6000, 1200)
-            occupancy_rate = st.slider("Taux d'occupation (%)", 0.0, 100.0, 20.0)
-            temperature = st.slider("Température", -10.0, 40.0, 18.0)
-            humidity = st.slider("Humidité", 0.0, 100.0, 50.0)
-            wind_speed = st.slider("Vitesse du vent", 0.0, 100.0, 10.0)
+        zone_df = (
+            traffic_df[traffic_df["location_name"] == selected_zone]
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
 
-        with col2:
-            precipitation = st.slider("Précipitations", 0.0, 50.0, 0.0)
-            no2 = st.slider("NO2", 0.0, 150.0, 20.0)
-            pm10 = st.slider("PM10", 0.0, 150.0, 15.0)
-            pm25 = st.slider("PM2.5", 0.0, 150.0, 10.0)
-            hour = st.slider("Heure", 0, 23, 8)
-            day_of_week = st.slider("Jour de semaine", 0, 6, 1)
-            month = st.slider("Mois", 1, 12, 5)
-            is_weekend = st.selectbox("Week-end ?", [0, 1])
+        if len(zone_df) < 2:
+            st.warning("Pas assez de données pour ce capteur.")
+        else:
+            latest = zone_df.iloc[-1]
+            previous = zone_df.iloc[-2]
 
-        input_data = pd.DataFrame([{
-            "flow_rate": flow_rate,
-            "occupancy_rate": occupancy_rate,
-            "temperature": temperature,
-            "humidity": humidity,
-            "wind_speed": wind_speed,
-            "precipitation": precipitation,
-            "no2": no2,
-            "pm10": pm10,
-            "pm25": pm25,
-            "hour": hour,
-            "day_of_week": day_of_week,
-            "month": month,
-            "is_weekend": is_weekend
-        }])
+            st.subheader("Dernière mesure connue")
 
-        if st.button("Prédire la congestion"):
-            prediction = model.predict(input_data)[0]
-            label = classify_congestion_label(prediction)
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Débit actuel", round(latest["flow_rate"], 2))
+            col2.metric("Occupation actuelle", f"{round(latest['occupancy_rate'], 2)} %")
+            col3.metric("État actuel", latest["congestion_estimee"])
 
-            st.success(f"Niveau de congestion prédit : {label}")
+            input_data = pd.DataFrame([{
+                "sensor_code": get_sensor_code(latest["location_name"]),
+                "flow_rate": latest["flow_rate"],
+                "occupancy_rate": latest["occupancy_rate"],
+                "flow_rate_lag_1": previous["flow_rate"],
+                "occupancy_lag_1": previous["occupancy_rate"],
+                "hour": latest["timestamp"].hour,
+                "day_of_week": latest["timestamp"].dayofweek,
+                "month": latest["timestamp"].month,
+                "is_weekend": int(latest["timestamp"].dayofweek >= 5)
+            }])
 
-            st.dataframe(input_data, use_container_width=True)
+            predicted_flow = model.predict(input_data)[0]
+            predicted_congestion = congestion_from_flow(predicted_flow)
+            evolution = predicted_flow - latest["flow_rate"]
+
+            st.subheader("Prévision H+1")
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Débit prédit", round(predicted_flow, 2))
+            col2.metric("Congestion prévue", predicted_congestion)
+            col3.metric("Évolution estimée", round(evolution, 2))
+
+            if predicted_congestion == "Forte":
+                st.error("⚠️ Risque élevé de congestion sur ce capteur.")
+            elif predicted_congestion == "Moyenne":
+                st.warning("🟠 Trafic modéré à surveiller.")
+            else:
+                st.success("🟢 Trafic fluide prévu.")
+
+            if predicted_congestion in ["Moyenne", "Forte"]:
+                st.subheader("🤖 Assistant mobilité IA")
+
+                if st.button("Générer une recommandation alternative"):
+                    transports = get_nearby_transports(
+                        latest["latitude"],
+                        latest["longitude"]
+                    )
+
+                    st.write("Transports proches détectés :")
+
+                    if transports:
+                        st.dataframe(pd.DataFrame(transports), width="stretch")
+
+                    recommendation = generate_mistral_recommendation(
+                        location_name=selected_zone,
+                        congestion=predicted_congestion,
+                        current_flow=latest["flow_rate"],
+                        predicted_flow=predicted_flow,
+                        transports=transports
+                    )
+
+                    st.info(recommendation)
+
+            st.subheader("Historique du capteur")
+
+            fig = px.line(
+                zone_df,
+                x="timestamp",
+                y="flow_rate",
+                title=f"Historique du débit - {selected_zone}"
+            )
+            st.plotly_chart(fig, width="stretch")
+
+            st.subheader("Données utilisées par le modèle")
+            st.dataframe(input_data, width="stretch")
+
+
+elif page == "📈 Monitoring IA":
+    st.title("📈 Monitoring du modèle IA")
+
+    model_path = "models/traffic_forecast_model.pkl"
+    dataset_path = "data/processed/forecast_dataset.csv"
+
+    if not os.path.exists(model_path):
+        st.error("Modèle introuvable.")
+
+    elif not os.path.exists(dataset_path):
+        st.error("Dataset forecast introuvable.")
+
+    else:
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+        model = joblib.load(model_path)
+        ml_df = pd.read_csv(dataset_path)
+
+        X = ml_df.drop(columns=["flow_rate_next"])
+        y = ml_df["flow_rate_next"]
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=42
+        )
+
+        y_pred = model.predict(X_test)
+
+        mae = mean_absolute_error(y_test, y_pred)
+        rmse = mean_squared_error(y_test, y_pred) ** 0.5
+        r2 = r2_score(y_test, y_pred)
+
+        st.subheader("Performances du modèle")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("MAE", round(mae, 2))
+        col2.metric("RMSE", round(rmse, 2))
+        col3.metric("R²", round(r2, 4))
+
+        st.divider()
+
+        st.subheader("Informations dataset")
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Nombre de lignes", ml_df.shape[0])
+        col2.metric("Nombre de variables", ml_df.shape[1] - 1)
+        col3.metric("Variable cible", "flow_rate_next")
+
+        st.divider()
+
+        st.subheader("Comparaison Réalité vs Prédiction")
+
+        comparison_df = pd.DataFrame({
+            "Valeur réelle": y_test.values,
+            "Prédiction": y_pred
+        })
+
+        fig = px.scatter(
+            comparison_df,
+            x="Valeur réelle",
+            y="Prédiction",
+            title="Prédictions vs Réalité"
+        )
+
+        st.plotly_chart(fig, width="stretch")
+
+        st.divider()
+
+        st.subheader("Distribution de la cible")
+
+        fig = px.histogram(
+            ml_df,
+            x="flow_rate_next",
+            nbins=30,
+            title="Distribution du trafic futur"
+        )
+
+        st.plotly_chart(fig, width="stretch")
+
+        st.divider()
+
+        st.subheader("Importance des variables")
+
+        feature_names = X.columns
+
+        importance_df = pd.DataFrame({
+            "feature": feature_names,
+            "importance": model.feature_importances_
+        }).sort_values("importance", ascending=False)
+
+        fig = px.bar(
+            importance_df,
+            x="importance",
+            y="feature",
+            orientation="h",
+            title="Variables les plus importantes"
+        )
+
+        st.plotly_chart(fig, width="stretch")
+        st.dataframe(importance_df, width="stretch")
+
+        st.divider()
+
+        st.subheader("Interprétation métier")
+
+        st.success(f"""
+Le modèle explique environ {round(r2*100,2)} % de la variation du trafic futur.
+
+Une erreur moyenne d'environ {round(mae,2)} véhicules est observée.
+
+Les variables les plus influentes sont visibles ci-dessus et permettent
+d'anticiper les niveaux futurs de circulation sur les capteurs.
+        """)
+
+
+elif page == "💡 Recommandations":
+    st.title("💡 Recommandations intelligentes")
+
+    st.markdown("""
+    Cette page identifie les capteurs à risque à partir du modèle de prévision H+1
+    et génère des recommandations opérationnelles.
+    """)
+
+    model_path = "models/traffic_forecast_model.pkl"
+
+    if not os.path.exists(model_path):
+        st.error("Modèle forecast introuvable. Lance : python models/train_forecast_model.py")
+
+    else:
+        model = joblib.load(model_path)
+        recommendations = []
+
+        for location_name in traffic_df["location_name"].dropna().unique():
+            zone_df = (
+                traffic_df[traffic_df["location_name"] == location_name]
+                .sort_values("timestamp")
+                .reset_index(drop=True)
+            )
+
+            if len(zone_df) < 2:
+                continue
+
+            latest = zone_df.iloc[-1]
+            previous = zone_df.iloc[-2]
+
+            input_data = pd.DataFrame([{
+                "sensor_code": get_sensor_code(latest["location_name"]),
+                "flow_rate": latest["flow_rate"],
+                "occupancy_rate": latest["occupancy_rate"],
+                "flow_rate_lag_1": previous["flow_rate"],
+                "occupancy_lag_1": previous["occupancy_rate"],
+                "hour": latest["timestamp"].hour,
+                "day_of_week": latest["timestamp"].dayofweek,
+                "month": latest["timestamp"].month,
+                "is_weekend": int(latest["timestamp"].dayofweek >= 5)
+            }])
+
+            predicted_flow = model.predict(input_data)[0]
+            congestion = congestion_from_flow(predicted_flow)
+            evolution = predicted_flow - latest["flow_rate"]
+
+            if congestion == "Forte":
+                recommendation = "Éviter la zone ou proposer un itinéraire alternatif."
+                priority = "Haute"
+            elif congestion == "Moyenne":
+                recommendation = "Surveiller la zone et anticiper une possible hausse du trafic."
+                priority = "Moyenne"
+            else:
+                recommendation = "Trafic fluide, aucune action urgente nécessaire."
+                priority = "Faible"
+
+            recommendations.append({
+                "Capteur": location_name,
+                "Débit actuel": round(latest["flow_rate"], 2),
+                "Débit prévu H+1": round(predicted_flow, 2),
+                "Évolution": round(evolution, 2),
+                "Congestion prévue": congestion,
+                "Priorité": priority,
+                "Recommandation": recommendation
+            })
+
+        reco_df = pd.DataFrame(recommendations)
+
+        if reco_df.empty:
+            st.warning("Pas assez de données pour générer des recommandations.")
+
+        else:
+            st.subheader("Synthèse des recommandations")
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Alertes haute priorité", len(reco_df[reco_df["Priorité"] == "Haute"]))
+            col2.metric("Alertes moyenne priorité", len(reco_df[reco_df["Priorité"] == "Moyenne"]))
+            col3.metric("Zones fluides", len(reco_df[reco_df["Priorité"] == "Faible"]))
+
+            st.divider()
+
+            priority_filter = st.multiselect(
+                "Filtrer par priorité",
+                ["Haute", "Moyenne", "Faible"],
+                default=["Haute", "Moyenne", "Faible"]
+            )
+
+            filtered_df = reco_df[reco_df["Priorité"].isin(priority_filter)]
+
+            st.dataframe(
+                filtered_df.sort_values("Évolution", ascending=False),
+                width="stretch"
+            )
+
+            st.divider()
+
+            st.subheader("Top zones à surveiller")
+
+            top_risk = filtered_df.sort_values(
+                "Débit prévu H+1",
+                ascending=False
+            ).head(10)
+
+            fig = px.bar(
+                top_risk,
+                x="Capteur",
+                y="Débit prévu H+1",
+                color="Priorité",
+                title="Top 10 des zones à risque selon la prévision H+1",
+                text_auto=True
+            )
+
+            st.plotly_chart(fig, width="stretch")
+
+            st.divider()
+
+            st.subheader("Lecture métier")
+
+            st.info("""
+Cette page transforme les prédictions du modèle en décisions opérationnelles.
+Elle permet d’identifier rapidement les zones à surveiller et de proposer
+des actions adaptées selon le niveau de congestion attendu.
+            """)

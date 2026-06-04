@@ -14,3 +14,4 @@ streamlit-folium
 python-dotenv
 joblib
 jupyter
+mistralai

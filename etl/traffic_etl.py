@@ -28,32 +28,47 @@ engine = create_engine(
     f"postgresql+psycopg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
-URL = (
+BASE_URL = (
     "https://opendata.paris.fr/api/explore/v2.1/catalog/"
-    "datasets/comptages-routiers-permanents/records?limit=100"
+    "datasets/comptages-routiers-permanents/records"
 )
 
+LIMIT = 100
+MAX_RECORDS = 1000
 
-# =========================
-# EXTRACTION
-# =========================
+all_records = []
 
-print("Téléchargement des données trafic...")
+print("Téléchargement des données trafic avec pagination...")
 
-response = requests.get(URL)
+for offset in range(0, MAX_RECORDS, LIMIT):
+    url = (
+    f"{BASE_URL}"
+    f"?limit={LIMIT}"
+    f"&offset={offset}"
+    f"&order_by=t_1h%20desc"
+)
 
-if response.status_code != 200:
-    raise Exception(f"Erreur API OpenData Paris : {response.status_code}")
+    response = requests.get(url)
 
-data = response.json()
-records = data.get("results", [])
+    if response.status_code != 200:
+        print(f"Erreur API à offset={offset} : {response.status_code}")
+        break
 
-df = pd.json_normalize(records)
+    data = response.json()
+    records = data.get("results", [])
 
-print(f"{len(df)} lignes récupérées")
+    if not records:
+        print("Plus aucune donnée disponible.")
+        break
+
+    all_records.extend(records)
+    print(f"Offset {offset} : {len(records)} lignes récupérées")
+
+df = pd.json_normalize(all_records)
+
+print(f"{len(df)} lignes récupérées au total")
 print("Colonnes disponibles :")
 print(df.columns)
-
 
 # =========================
 # TRANSFORMATION
@@ -63,7 +78,7 @@ selected_columns = [
     "q",                  # débit
     "k",                  # taux d'occupation
     "etat_trafic",         # état trafic, souvent vide
-    "date_debut",          # timestamp
+    "t_1h",         # timestamp
     "geo_point_2d.lat",
     "geo_point_2d.lon",
     "libelle"
