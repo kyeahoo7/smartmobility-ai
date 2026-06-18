@@ -311,23 +311,8 @@ if page == "🏠 Accueil":
 
     st.divider()
 
-    st.subheader("Pipeline du projet")
-    st.code("""
-OpenData Paris / Open-Meteo
-        ↓
-ETL Python
-        ↓
-PostgreSQL
-        ↓
-Feature Engineering
-        ↓
-Modèle IA RandomForest Regressor
-        ↓
-Dashboard Streamlit
-    """)
-
     st.subheader("Aperçu des données")
-    st.dataframe(traffic_df.head(20), width="stretch")
+    st.dataframe(traffic_df.head(20), use_container_width=True)
 
 
 elif page == "📊 Analyse trafic":
@@ -342,7 +327,7 @@ elif page == "📊 Analyse trafic":
             nbins=30,
             title="Distribution du débit de circulation"
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
     with col2:
         fig = px.histogram(
@@ -351,7 +336,7 @@ elif page == "📊 Analyse trafic":
             nbins=30,
             title="Distribution du taux d’occupation"
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Évolution temporelle du trafic")
 
@@ -362,7 +347,7 @@ elif page == "📊 Analyse trafic":
         color="location_name",
         title="Débit de circulation par capteur"
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Analyse par zone")
 
@@ -378,7 +363,7 @@ elif page == "📊 Analyse trafic":
     col2.metric("Occupation moyenne", f"{round(zone_df['occupancy_rate'].mean(), 2)} %")
     col3.metric("État dominant", zone_df["congestion_level"].mode()[0])
 
-    st.dataframe(zone_df, width="stretch")
+    st.dataframe(zone_df, use_container_width=True)
 
 
 elif page == "🗺️ Carte interactive":
@@ -429,7 +414,7 @@ elif page == "🗺️ Carte interactive":
         margin={"r": 0, "t": 40, "l": 0, "b": 0}
     )
 
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 elif page == "🚨 Zones critiques":
@@ -460,10 +445,10 @@ elif page == "🚨 Zones critiques":
         title="Classement des zones critiques",
         text_auto=True
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Tableau détaillé")
-    st.dataframe(critical_df, width="stretch")
+    st.dataframe(critical_df, use_container_width=True)
 
     st.subheader("Interprétation")
     st.markdown("""
@@ -489,7 +474,7 @@ elif page == "🌦️ Météo & pollution":
         y=["temperature", "humidity", "wind_speed", "precipitation"],
         title="Évolution des données météo"
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
 
@@ -506,10 +491,10 @@ elif page == "🌦️ Météo & pollution":
         y=["no2", "pm10", "pm25"],
         title="Évolution des polluants"
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Table pollution")
-    st.dataframe(pollution_df.head(50), width="stretch")
+    st.dataframe(pollution_df.head(50), use_container_width=True)
 
 
 elif page == "🚗 Prévision trafic H+1":
@@ -593,7 +578,7 @@ elif page == "🚗 Prévision trafic H+1":
                     st.write("Transports proches détectés :")
 
                     if transports:
-                        st.dataframe(pd.DataFrame(transports), width="stretch")
+                        st.dataframe(pd.DataFrame(transports), use_container_width=True)
 
                     recommendation = generate_mistral_recommendation(
                         location_name=selected_zone,
@@ -613,10 +598,10 @@ elif page == "🚗 Prévision trafic H+1":
                 y="flow_rate",
                 title=f"Historique du débit - {selected_zone}"
             )
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Données utilisées par le modèle")
-            st.dataframe(input_data, width="stretch")
+            st.dataframe(input_data, use_container_width=True)
 
 
 elif page == "📈 Monitoring IA":
@@ -686,7 +671,7 @@ elif page == "📈 Monitoring IA":
             title="Prédictions vs Réalité"
         )
 
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
 
@@ -699,7 +684,7 @@ elif page == "📈 Monitoring IA":
             title="Distribution du trafic futur"
         )
 
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
         st.divider()
 
@@ -720,8 +705,8 @@ elif page == "📈 Monitoring IA":
             title="Variables les plus importantes"
         )
 
-        st.plotly_chart(fig, width="stretch")
-        st.dataframe(importance_df, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(importance_df, use_container_width=True)
 
         st.divider()
 
@@ -828,7 +813,7 @@ elif page == "💡 Recommandations":
 
             st.dataframe(
                 filtered_df.sort_values("Évolution", ascending=False),
-                width="stretch"
+                use_container_width=True
             )
 
             st.divider()
@@ -849,7 +834,7 @@ elif page == "💡 Recommandations":
                 text_auto=True
             )
 
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
             st.divider()
 
